@@ -4,6 +4,7 @@ import { FBXLoader } from 'three/examples/jsm/loaders/FBXLoader.js'
 import * as SkeletonUtils from 'three/examples/jsm/utils/SkeletonUtils.js'
 import { MODEL_MANIFEST } from './modelManifest.js'
 import { FISH_TYPES } from './fishTypes.js'
+import { DECOR_TYPES } from './decor.js'
 
 const gltfLoader = new GLTFLoader()
 const fbxLoader = new FBXLoader()
@@ -47,4 +48,21 @@ export async function preloadModels() {
 
 export function cloneModel(scene) {
   return SkeletonUtils.clone(scene)
+}
+
+export async function loadDecorModels() {
+  const map = {}
+  const files = new Set(Object.values(DECOR_TYPES).map((d) => d.model).filter(Boolean))
+  await Promise.all(
+    [...files].map(async (file) => {
+      try {
+        const data = await loadByExt('/models/' + file)
+        fitModel(data.scene, 4)
+        map[file] = data.scene
+      } catch (err) {
+        console.warn('Failed to load decor model', file, err)
+      }
+    })
+  )
+  return map
 }

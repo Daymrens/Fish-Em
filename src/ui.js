@@ -1,6 +1,7 @@
 import * as THREE from 'three'
 import { FISH_TYPES } from './fishTypes.js'
 import { DECOR_TYPES } from './decor.js'
+import { applyAudioToggles } from './audio.js'
 
 export function fishSVG(color) {
   const hex = '#' + color.toString(16).padStart(6, '0')
@@ -17,10 +18,23 @@ export function fishSVG(color) {
     </svg>`
 }
 
-export function createUI({ store, scene, camera, renderer, fishLayer, decorationsLayer, gravel, api }) {
+export function foodSVG() {
+  return `
+    <svg viewBox="0 0 100 60" class="fishsvg" aria-hidden="true">
+      <g class="body">
+        <circle cx="38" cy="30" r="9" fill="#e0a64b"></circle>
+        <circle cx="58" cy="26" r="7" fill="#d98b3a"></circle>
+        <circle cx="56" cy="40" r="6" fill="#e8b85e"></circle>
+        <circle cx="30" cy="40" r="5" fill="#c97a2e"></circle>
+        <circle cx="46" cy="44" r="4" fill="#e0a64b"></circle>
+      </g>
+    </svg>`
+}
+
+export function createUI({ store, scene, camera, renderer, fishLayer, decorationsLayer, gravel, glass, api }) {
   const root = document.getElementById('ui-root')
 
-  const state = { view: 'home', editMode: false, paletteType: 'plant', fishModal: false, shopModal: false, panelOpen: false }
+  const state = { view: 'home', editMode: false, feedMode: false, paletteType: 'plant', fishModal: false, shopModal: false, shopTab: 'fish', panelOpen: false, panelTab: 'tank' }
 
   const raycaster = new THREE.Raycaster()
   const mouse = new THREE.Vector2()
@@ -72,7 +86,7 @@ export function createUI({ store, scene, camera, renderer, fishLayer, decoration
   }
 
   function onDown(e) {
-    if (e.target !== renderer.domElement) return
+    if (e.target && e.target.closest && e.target.closest('.topbar, .panel, .infopanel, .modal-back, .toast-wrap, [data-action], [data-stop]')) return
     if (Math.hypot(e.clientX - downX, e.clientY - downY) > 6) return
     setMouse(e)
     raycaster.setFromCamera(mouse, camera)
@@ -89,6 +103,19 @@ export function createUI({ store, scene, camera, renderer, fishLayer, decoration
       }
       const gHits = raycaster.intersectObject(gravel)
       if (gHits.length) api.placeDecor(state.paletteType, gHits[0].point)
+      return
+    }
+
+    if (state.feedMode) {
+      const gHits = glass ? raycaster.intersectObject(glass) : []
+      let point = null
+      if (gHits.length) {
+        point = gHits[0].point
+      } else {
+        point = new THREE.Vector3(0, 0, 0)
+      }
+      const ok = api.dropFoodAt(point)
+      if (ok && store.food <= 0) setFeedMode(false)
       return
     }
 
@@ -112,8 +139,9 @@ export function createUI({ store, scene, camera, renderer, fishLayer, decoration
     top.innerHTML = `
       <div class="coins">Coins: <span data-bind="coins">${Math.floor(store.coins)}</span></div>
       <div class="topbtns">
+        <button data-action="feed" class="${state.feedMode ? 'active' : ''}" ${store.food <= 0 ? 'disabled' : ''}>Feed (${store.food})</button>
         <button data-action="shop">Shop</button>
-        <button data-action="decor">${state.editMode ? 'Exit Decor' : 'Decorate'}</button>
+        <button data-action="panel">Menu</button>
       </div>`
     root.appendChild(top)
 
@@ -123,7 +151,10 @@ export function createUI({ store, scene, camera, renderer, fishLayer, decoration
     if (fish) {
       const s = fish.stats
       info.innerHTML = `
-        <div class="info-name">${fish.name}</div>
+        <div class="info-name-row">
+          <input class="info-rename" data-action="rename" data-id="${fish.id}" value="${fish.name.replace(/"/g, '&quot;')}" />
+          <span class="tier-badge tier-${fish.type.tier}">${fish.type.tier}</span>
+        </div>
         <div class="info-sub">${fish.type.name}</div>
         <div class="stat"><label>Happiness</label><div class="bar"><div class="fill" data-bind="sel-hap-bar" style="width:${s.happiness}%"></div></div><span data-bind="sel-hap">${Math.round(s.happiness)}</span></div>
         <div class="stat"><label>Health</label><div class="bar"><div class="fill hp" data-bind="sel-hp-bar" style="width:${s.health}%"></div></div><span data-bind="sel-hp">${Math.round(s.health)}</span></div>
@@ -132,7 +163,13 @@ export function createUI({ store, scene, camera, renderer, fishLayer, decoration
         <button class="info-sell" data-action="sell" data-id="${fish.id}">Sell (${store.sellValue(fish)})</button>
         <button class="info-save" data-action="save">Save Game</button>`
     } else {
-      info.innerHTML = `<div class="info-empty">Select a fish to see its details</div>`
+      const cost = store.tankUpgradeCost()
+      info.innerHTML = `
+        <div class="info-empty">Select a fish to see its details</div>
+        <div class="tank-up">
+          <div>Tank Level ${store.tankLevel + 1}</div>
+          <button class="info-save" data-action="upgrade">Upgrade Tank (${cost})</button>
+        </div>`
     }
     root.appendChild(info)
 
@@ -142,8 +179,12 @@ export function createUI({ store, scene, camera, renderer, fishLayer, decoration
       panel.dataset.drag = '1'
       panel.innerHTML = `
         <div class="panel-head" data-drag-handle="1">
-          <span>${state.view === 'shop' ? 'Shop' : state.view === 'decor' ? 'Decorations' : 'Tank Info'}</span>
+          <span>Menu</span>
           <button class="panel-x" data-action="closepanel">✕</button>
+        </div>
+        <div class="tabs">
+          <button class="tab ${state.panelTab === 'tank' ? 'sel' : ''}" data-action="tab" data-type="tank">Tank</button>
+          <button class="tab ${state.panelTab === 'settings' ? 'sel' : ''}" data-action="tab" data-type="settings">Settings</button>
         </div>`
       panel.appendChild(buildPanel())
       root.appendChild(panel)
@@ -179,7 +220,46 @@ export function createUI({ store, scene, camera, renderer, fishLayer, decoration
       root.appendChild(modal)
     }
 
+    const toast = document.createElement('div')
+    toast.className = 'toast-wrap'
+    toast.id = 'toast-wrap'
+    root.appendChild(toast)
+
     if (state.shopModal) {
+      const tab = state.shopTab
+      let body = ''
+      if (tab === 'food') {
+        body = `
+          <div class="fishtile ${store.coins >= 50 ? '' : 'locked'}">
+            ${foodSVG()}
+            <div class="fishtile-name">Fish Food</div>
+            <div class="fishtile-species">x5 / 50c</div>
+            <span class="tier-badge tier-common">stock ${store.food}</span>
+            <button class="fishtile-buy" data-action="buyfood" ${store.coins >= 50 ? '' : 'disabled'}>Buy x5</button>
+          </div>`
+      } else if (tab === 'decor') {
+        body = Object.entries(DECOR_TYPES).map(([key, d]) => {
+          const can = store.coins >= d.price
+          return `
+          <div class="fishtile ${can ? '' : 'locked'}">
+            <div class="fishtile-name">${d.name}</div>
+            <div class="fishtile-species">${d.price}</div>
+            <button class="fishtile-buy" data-action="pickdecor" data-type="${key}" ${can ? '' : 'disabled'}>Place</button>
+          </div>`
+        }).join('')
+      } else {
+        body = Object.entries(FISH_TYPES).map(([key, t]) => {
+          const can = store.coins >= t.price
+          return `
+          <div class="fishtile ${can ? '' : 'locked'}">
+            ${fishSVG(t.color)}
+            <div class="fishtile-name">${t.name}</div>
+            <div class="fishtile-species">${t.price}</div>
+            <span class="tier-badge tier-${t.tier}">${t.tier}</span>
+            <button class="fishtile-buy" data-action="buy" data-type="${key}" ${can ? '' : 'disabled'}>Buy</button>
+          </div>`
+        }).join('')
+      }
       const modal = document.createElement('div')
       modal.className = 'modal-back'
       modal.dataset.action = 'closeshop'
@@ -189,19 +269,15 @@ export function createUI({ store, scene, camera, renderer, fishLayer, decoration
             <h2>Shop</h2>
             <button class="modal-x" data-action="closeshop">✕</button>
           </div>
-          <div class="modal-grid">
-            ${Object.entries(FISH_TYPES).map(([key, t]) => {
-              const can = store.coins >= t.price
-              return `
-              <div class="fishtile ${can ? '' : 'locked'}">
-                ${fishSVG(t.color)}
-                <div class="fishtile-name">${t.name}</div>
-                <div class="fishtile-species">${t.price}</div>
-                <button class="fishtile-buy" data-action="buy" data-type="${key}" ${can ? '' : 'disabled'}>Buy</button>
-              </div>`
-            }).join('')}
+          <div class="tabs">
+            <button class="tab ${tab === 'fish' ? 'sel' : ''}" data-action="shoptab" data-type="fish">Fish</button>
+            <button class="tab ${tab === 'food' ? 'sel' : ''}" data-action="shoptab" data-type="food">Food</button>
+            <button class="tab ${tab === 'decor' ? 'sel' : ''}" data-action="shoptab" data-type="decor">Decor</button>
           </div>
-          <p class="hint">Buy fish, keep them happy, then sell for more.</p>
+          <div class="shop-scroll">
+            <div class="modal-grid">${body}</div>
+          </div>
+          <p class="hint">Pick decor, then click the tank to place it.</p>
         </div>`
       root.appendChild(modal)
     }
@@ -210,39 +286,24 @@ export function createUI({ store, scene, camera, renderer, fishLayer, decoration
   function buildPanel() {
     const wrap = document.createElement('div')
 
-    if (state.view === 'shop') {
-      wrap.innerHTML = `<h2>Shop</h2><div class="shopgrid">`
-      for (const [key, t] of Object.entries(FISH_TYPES)) {
-        const can = store.coins >= t.price
-        wrap.innerHTML += `
-          <div class="fishtile ${can ? '' : 'locked'}">
-            ${fishSVG(t.color)}
-            <div class="fishtile-name">${t.name}</div>
-            <div class="fishtile-species">${t.price}</div>
-            <button class="fishtile-buy" data-action="buy" data-type="${key}" ${can ? '' : 'disabled'}>Buy</button>
-          </div>`
-      }
-      wrap.innerHTML += `</div><p class="hint">Buy fish, keep them happy, then sell for more.</p>`
-      return wrap
-    }
-
-    if (state.view === 'decor') {
-      wrap.innerHTML = `<h2>Decorations</h2><p class="hint">Pick an item, then click the tank floor to place it.</p>`
-      for (const [key, d] of Object.entries(DECOR_TYPES)) {
-        const sel = state.paletteType === key ? 'sel' : ''
-        wrap.innerHTML += `<button class="pal ${sel}" data-action="palette" data-type="${key}">${d.name} (${d.price})</button>`
-      }
-      const sd = store.decorations.find((x) => x.id === store.selectedDecorId)
-      if (sd) {
-        const d = DECOR_TYPES[sd.typeKey]
-        wrap.innerHTML += `
-          <div class="row"><span>Selected: ${d.name}</span></div>
-          <div class="row">
-            <button data-action="rotL" data-id="${sd.id}">Rotate &lsaquo;</button>
-            <button data-action="rotR" data-id="${sd.id}">Rotate &rsaquo;</button>
-            <button data-action="rmDecor" data-id="${sd.id}">Remove</button>
-          </div>`
-      }
+    if (state.panelTab === 'settings') {
+      const music = localStorage.getItem('fishsim-music') !== '0'
+      const sfx = localStorage.getItem('fishsim-sfx') !== '0'
+      wrap.innerHTML = `
+        <h2>Settings</h2>
+        <label class="set-row">Music
+          <input type="checkbox" data-set="music" ${music ? 'checked' : ''}>
+        </label>
+        <label class="set-row">Sound Effects
+          <input type="checkbox" data-set="sfx" ${sfx ? 'checked' : ''}>
+        </label>
+        <div class="row"><button data-action="save">Save Game</button></div>`
+      wrap.querySelectorAll('input[data-set]').forEach((inp) => {
+        inp.addEventListener('change', () => {
+          localStorage.setItem('fishsim-' + inp.dataset.set, inp.checked ? '1' : '0')
+          applyAudioToggles()
+        })
+      })
       return wrap
     }
 
@@ -261,10 +322,20 @@ export function createUI({ store, scene, camera, renderer, fishLayer, decoration
     }
 
     wrap.innerHTML = `
-      <h2>Your Tank</h2>
+      <h2>Tank Details</h2>
+      <div class="stat"><label>Tank Level</label><span>${store.tankLevel + 1}</span></div>
       <div class="stat"><label>Fish</label><span>${store.fish.length}</span></div>
       <div class="stat"><label>Coins</label><span>${Math.floor(store.coins)}</span></div>
-      <p class="hint">Click a fish to view its stats. Use the Shop to buy more.</p>`
+      <div class="stat"><label>Food</label><span>${store.food}</span></div>
+      <div class="stat"><label>Decor</label><span>${store.decorations.length}</span></div>
+      <div class="fishlist">
+        ${store.fish.map((f) => `
+          <div class="fishrow" data-action="select" data-id="${f.id}">
+            <span>${f.name}</span>
+            <span class="mini" data-bind="hap-${f.id}">${Math.round(f.stats.happiness)}</span>
+          </div>`).join('')}
+      </div>
+      <div class="row"><button data-action="save">Save Game</button></div>`
     return wrap
   }
 
@@ -274,11 +345,15 @@ export function createUI({ store, scene, camera, renderer, fishLayer, decoration
     const a = t.dataset.action
     const id = t.dataset.id
     const type = t.dataset.type
-    if (a === 'home') {
-      state.view = 'home'
-      state.editMode = false
-      store.selectedDecorId = null
-      state.panelOpen = true
+    if (a === 'rename') return
+    if (a === 'panel') {
+      state.panelOpen = !state.panelOpen
+      render()
+    } else if (a === 'tab') {
+      state.panelTab = type
+      render()
+    } else if (a === 'shoptab') {
+      state.shopTab = type
       render()
     } else if (a === 'closepanel') {
       state.panelOpen = false
@@ -289,26 +364,39 @@ export function createUI({ store, scene, camera, renderer, fishLayer, decoration
     } else if (a === 'closeshop') {
       state.shopModal = false
       render()
-    } else if (a === 'decor') {
-      state.editMode = !state.editMode
-      state.view = 'decor'
-      state.panelOpen = true
-      if (!state.editMode) store.selectedDecorId = null
-      render()
+    } else if (a === 'feed') {
+      api.setFeedMode(!state.feedMode)
     } else if (a === 'fishmodal') {
       state.fishModal = true
       render()
     } else if (a === 'closemodal') {
       state.fishModal = false
       render()
-    } else if (a === 'palette') {
-      state.paletteType = type
-      render()
     } else if (a === 'buy') {
       api.buyFish(type)
+    } else if (a === 'buyfood') {
+      api.buyFood()
+    } else if (a === 'pickdecor') {
+      const d = DECOR_TYPES[type]
+      if (store.coins < d.price) {
+        store.toast('Not enough coins')
+        render()
+        return
+      }
+      state.editMode = true
+      state.paletteType = type
+      state.shopModal = false
+      store.selectedDecorId = null
+      render()
+      store.toast('Click the tank to place ' + d.name)
+    } else if (a === 'upgrade') {
+      api.upgradeTank()
+      render()
     } else if (a === 'save') {
       store.save()
       flashSaved()
+    } else if (a === 'rename') {
+      api.renameFish(Number(id), e.target.value.trim())
     } else if (a === 'sell') {
       api.sellFish(Number(id))
     } else if (a === 'select') {
@@ -321,6 +409,13 @@ export function createUI({ store, scene, camera, renderer, fishLayer, decoration
       api.rotateDecor(Number(id), 1)
     } else if (a === 'rmDecor') {
       api.removeDecor(Number(id))
+    }
+  })
+
+  root.addEventListener('change', (e) => {
+    const t = e.target.closest('[data-action="rename"]')
+    if (t) {
+      api.renameFish(Number(t.dataset.id), t.value.trim())
     }
   })
 
@@ -341,6 +436,21 @@ export function createUI({ store, scene, camera, renderer, fishLayer, decoration
     setTimeout(() => { if (btn.isConnected) btn.textContent = old }, 1200)
   }
 
+  function flashToast(msg) {
+    const wrap = root.querySelector('#toast-wrap')
+    if (!wrap) return
+    const el = document.createElement('div')
+    el.className = 'toast'
+    el.textContent = msg
+    wrap.appendChild(el)
+    setTimeout(() => el.classList.add('show'), 10)
+    setTimeout(() => {
+      el.classList.remove('show')
+      setTimeout(() => el.remove(), 400)
+    }, 3200)
+  }
+  store.onToast = flashToast
+
   let acc = 0
   function tick(dt) {
     acc += dt
@@ -360,8 +470,14 @@ export function createUI({ store, scene, camera, renderer, fishLayer, decoration
     for (const f of store.fish) setBind('hap-' + f.id, Math.round(f.stats.happiness))
   }
 
+  function setFeedMode(on) {
+    state.feedMode = on
+    if (on) state.editMode = false
+    render()
+  }
+
   store.subscribe(render)
   render()
 
-  return { tick }
+  return { tick, setFeedMode }
 }

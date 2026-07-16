@@ -46,5 +46,19 @@ export function createScene(canvas) {
     renderer.setSize(window.innerWidth, window.innerHeight)
   })
 
-  return { renderer, scene, camera, controls }
+  const dayColor = new THREE.Color(0x0a2a43)
+  const nightColor = new THREE.Color(0x04101c)
+  const dayLight = new THREE.Color(0xffffff)
+  const nightLight = new THREE.Color(0x335577)
+
+  function setTimeOfDay(t) {
+    const k = (Math.sin(t * Math.PI * 2) + 1) / 2
+    scene.background.copy(nightColor).lerp(dayColor, k)
+    scene.fog.color.copy(nightColor).lerp(dayColor, k)
+    dir.color.copy(nightLight).lerp(dayLight, k)
+    dir.intensity = 0.4 + k * 0.7
+    ambient.intensity = 0.3 + k * 0.4
+  }
+
+  return { renderer, scene, camera, controls, setTimeOfDay }
 }

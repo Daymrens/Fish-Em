@@ -3,18 +3,20 @@ import { createScene } from './scene.js'
 import { createTank } from './tank.js'
 import { Fish } from './fish.js'
 import { FISH_TYPES } from './fishTypes.js'
-import { createDecorMesh, DECOR_TYPES } from './decor.js'
+import { createDecorMesh, DECOR_TYPES, preloadDecorModels } from './decor.js'
 import { Store } from './store.js'
 import { createUI } from './ui.js'
 import { fishSVG } from './ui.js'
-import { preloadModels } from './modelLoader.js'
+import { preloadModels, loadDecorModels } from './modelLoader.js'
+import { audio, applyAudioToggles } from './audio.js'
 
 const SAVE_KEY = 'fishsim'
 
 const canvas = document.getElementById('scene')
-const { renderer, scene, camera, controls } = createScene(canvas)
+const { renderer, scene, camera, controls, setTimeOfDay } = createScene(canvas)
 const tank = createTank(scene)
 const store = new Store()
+window.__store = store
 
 const fishLayer = new THREE.Group()
 scene.add(fishLayer)
@@ -25,10 +27,14 @@ let decorId = 0
 let modelMap = null
 let started = false
 
-const ui = createUI({ store, scene, camera, renderer, fishLayer, decorationsLayer, gravel: tank.gravel, api: {} })
+const api = { buyFish, sellFish, buyFood, placeDecor, removeDecor, rotateDecor, feedFish, dropFoodAt, setFeedMode, renameFish, upgradeTank }
+window.__api = api
+
+const ui = createUI({ store, scene, camera, renderer, fishLayer, decorationsLayer, gravel: tank.gravel, glass: tank.glass, api })
 
 async function boot() {
   modelMap = await preloadModels()
+  preloadDecorModels(await loadDecorModels())
   for (const key of Object.keys(FISH_TYPES)) spawn(key)
   store.emit()
   startScreen()
@@ -37,10 +43,17 @@ async function boot() {
     const dt = Math.min(clock.getDelta(), 0.05)
     controls.update()
     tank.update(dt)
+    const t = performance.now() * 0.00002
+    setTimeOfDay(t)
     for (const f of store.fish) {
-      f.update(dt)
+      f.update(dt, { foodNearest: tank.foodNearest, consumeFood: tank.consumeFood, foodActive: tank.foodActive })
       f.setHighlight(f.id === store.selectedId)
     }
+    const sel = store.getFish(store.selectedId)
+    if (sel) {
+      controls.target.lerp(sel.mesh.position, 0.04)
+    }
+    breedCheck(dt)
     ui.tick(dt)
     renderer.render(scene, camera)
     requestAnimationFrame(animate)
@@ -48,8 +61,38 @@ async function boot() {
   animate()
 }
 
-function spawn(typeKey) {
-  const f = new Fish(typeKey, FISH_TYPES[typeKey], modelMap.get(typeKey))
+function breedCheck(dt) {
+  if (store.fish.length < 2) return
+  const byType = {}
+  for (const f of store.fish) {
+    if (f.dead || f.breedCooldown > 0) continue
+    if (f.stats.happiness < 80 || f.stats.health < 70) continue
+    ;(byType[f.typeKey] = byType[f.typeKey] || []).push(f)
+  }
+  for (const key of Object.keys(byType)) {
+    const pair = byType[key]
+    if (pair.length < 2) continue
+    const a = pair[0]
+    const b = pair[1]
+    a.breedCooldown = 60
+    b.breedCooldown = 60
+    const child = spawn(key, {
+      color: new THREE.Color(a.overrideColor || a.type.color).lerp(new THREE.Color(b.overrideColor || b.type.color), 0.5).getHex(),
+    })
+    child.stats.happiness = 90
+    child.stats.health = 100
+    audio.sfx('breed')
+    store.markBreed()
+    store.toast('A new ' + a.type.name + ' was born!')
+    break
+  }
+}
+
+function spawn(typeKey, opts = {}) {
+  const f = new Fish(typeKey, FISH_TYPES[typeKey], modelMap.get(typeKey), opts)
+  if (opts.stats) f.stats = { ...f.stats, ...opts.stats }
+  if (opts.name) f.name = opts.name
+  if (opts.color) applyFishColor(f, opts.color)
   fishLayer.add(f.mesh)
   store.addFish(f)
   return f
@@ -68,10 +111,19 @@ function buyFish(typeKey) {
   return false
 }
 
+function buyFood() {
+  if (store.buyFood(5)) {
+    audio.sfx('buy')
+    store.toast('Bought 5 fish food (' + store.food + ' total)')
+  } else {
+    store.toast('Not enough coins')
+  }
+}
+
 function sellFish(id) {
   const f = store.getFish(id)
   if (!f) return
-  store.coins += store.sellValue(f)
+  store.addCoins(store.sellValue(f))
   despawn(f)
 }
 
@@ -108,8 +160,6 @@ function rotateDecor(id, dir) {
   }
 }
 
-const api = { buyFish, sellFish, placeDecor, removeDecor, rotateDecor }
-
 function clearTank() {
   for (const f of [...store.fish]) despawn(f)
   for (const d of [...store.decorations]) {
@@ -133,8 +183,8 @@ function loadGame() {
   if (!data) return false
   clearTank()
   for (const fd of data.fish || []) {
-    const f = spawn(fd.typeKey)
-    if (f && fd.stats) f.stats = { ...f.stats, ...fd.stats }
+    const f = spawn(fd.typeKey, { stats: fd.stats, name: fd.name, color: fd.color })
+    if (f && fd.color) applyFishColor(f, fd.color)
   }
   for (const dd of data.decorations || []) {
     if (!DECOR_TYPES[dd.typeKey]) continue
@@ -146,8 +196,19 @@ function loadGame() {
     mesh.userData.decorId = id
     store.decorations.push({ id, typeKey: dd.typeKey, mesh })
   }
+  const bonus = store.claimDaily()
+  if (bonus > 0) store.toast('Daily reward +' + bonus + ' coins')
   store.emit()
   return true
+}
+
+function applyFishColor(f, hex) {
+  const c = new THREE.Color(hex)
+  if (f.bodyMat) f.bodyMat.color.copy(c)
+  if (f.isModel) {
+    for (const e of f.modelMats) if (e.m.color) e.m.color.lerp(c, 0.6)
+  }
+  f.overrideColor = hex
 }
 
 function beginGame() {
@@ -155,12 +216,54 @@ function beginGame() {
   started = true
   const overlay = document.getElementById('start-screen')
   if (overlay) overlay.remove()
-  api.buyFish = buyFish
-  api.sellFish = sellFish
-  api.placeDecor = placeDecor
-  api.removeDecor = removeDecor
-  api.rotateDecor = rotateDecor
+  audio.init()
+  audio.resume()
+  applyAudioToggles()
   ui.tick(0)
+}
+
+function feedFish() {
+  if (store.food <= 0) {
+    store.toast('No food! Buy some in the Shop')
+    return
+  }
+  const n = Math.min(6, store.food)
+  store.food -= n
+  store.emit()
+  tank.dropFood(n)
+  audio.sfx('feed')
+  store.toast('Fed the fish (' + store.food + ' left)')
+}
+
+function dropFoodAt(point) {
+  if (store.food <= 0) {
+    store.toast('No food! Buy some in the Shop')
+    ui.setFeedMode(false)
+    return false
+  }
+  store.food -= 1
+  store.emit()
+  tank.dropFoodAt(point, 1)
+  audio.sfx('feed')
+  return true
+}
+
+function setFeedMode(on) {
+  ui.setFeedMode(on)
+}
+
+function renameFish(id, name) {
+  const f = store.getFish(id)
+  if (!f || !name) return
+  f.name = name
+  store.emit()
+}
+
+function upgradeTank() {
+  if (store.upgradeTank()) {
+    tank.resize(store.tankLevel)
+    audio.sfx('buy')
+  }
 }
 
 function startScreen() {
@@ -234,6 +337,7 @@ function showSettings(box) {
   box.querySelectorAll('input[data-set]').forEach((inp) => {
     inp.addEventListener('change', () => {
       localStorage.setItem('fishsim-' + inp.dataset.set, inp.checked ? '1' : '0')
+      applyAudioToggles()
     })
   })
 }

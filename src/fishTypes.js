@@ -44,17 +44,25 @@ const OVERRIDES = {
 
 const PALETTE = [0xff7755, 0x33ccff, 0xffd966, 0xffffff, 0x66bbcc, 0x88ccaa, 0xcc8844, 0xaa88cc, 0xdd6677]
 
+function tierFor(price) {
+  if (price >= 130) return 'legendary'
+  if (price >= 90) return 'rare'
+  return 'common'
+}
+
 function buildFishTypes() {
   const types = {}
   let pi = 0
   for (const [key, cfg] of Object.entries(MODEL_MANIFEST)) {
     const o = OVERRIDES[key] || {}
+    const price = o.price != null ? o.price : cfg.price
     types[key] = {
       name: cfg.name,
       color: o.color != null ? o.color : PALETTE[pi++ % PALETTE.length],
       size: o.size != null ? o.size : 0.8,
       speed: o.speed != null ? o.speed : 1.8,
-      price: cfg.price
+      price,
+      tier: tierFor(price)
     }
   }
   return types

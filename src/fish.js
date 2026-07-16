@@ -16,15 +16,20 @@ function finGeometry(shape) {
 }
 
 export class Fish {
-  constructor(typeKey, typeDef, modelData) {
+  constructor(typeKey, typeDef, modelData, opts = {}) {
     this.id = ++idCounter
     this.typeKey = typeKey
     this.type = typeDef
-    this.name = typeDef.name + ' #' + this.id
-    this.stats = { happiness: 80, health: 100, age: 0, hunger: 20 }
+    this.name = opts.name || (typeDef.name + ' #' + this.id)
+    this.overrideColor = opts.color || null
+    this.stats = { happiness: 80, health: 100, age: 0, hunger: 20, ...(opts.stats || {}) }
     this.speed = typeDef.speed
     this.tailPhase = Math.random() * Math.PI * 2
     this.flapPhase = Math.random() * Math.PI * 2
+    this.breedCooldown = 0
+    this.deadTimer = 0
+    this.dead = false
+    this.seeking = false
 
     this.isModel = false
     this.bodyMat = null
@@ -374,17 +379,43 @@ export class Fish {
     }
   }
 
-  update(dt) {
+  seekFood(foodApi) {
+    this.seeking = false
+    if (!foodApi) return false
+    const hasFood = foodApi.foodActive > 0
+    if (!hasFood) return false
+    const near = foodApi.foodNearest(this.mesh.position)
+    if (!near) return false
+    const target = new THREE.Vector3(near.x, near.y, near.z)
+    const dir = target.clone().sub(this.mesh.position)
+    this.seeking = true
+    if (dir.lengthSq() < 0.6) {
+      foodApi.consumeFood(near.index)
+      this.seeking = false
+      this.stats.hunger = clamp(this.stats.hunger - 28, 0, 100)
+      this.stats.happiness = clamp(this.stats.happiness + 8, 0, 100)
+      return false
+    }
+    this.heading.lerp(dir.normalize(), 0.35).normalize()
+    return true
+  }
+
+  update(dt, foodApi) {
     const pos = this.mesh.position
-    this.avoidWalls()
 
-    this.headPhase += dt
-    const wander = Math.sin(this.headPhase * 0.6 + this.id) * 0.6 + (Math.random() - 0.5) * 0.4
-    this.heading.applyAxisAngle(new THREE.Vector3(0, 1, 0), wander * dt * 0.9)
-    this.heading.y *= 0.95
-    this.heading.normalize()
+    const seeking = this.seekFood(foodApi)
 
-    pos.addScaledVector(this.heading, this.speed * dt)
+    if (!seeking) {
+      this.avoidWalls()
+      this.headPhase += dt
+      const wander = Math.sin(this.headPhase * 0.6 + this.id) * 0.6 + (Math.random() - 0.5) * 0.4
+      this.heading.applyAxisAngle(new THREE.Vector3(0, 1, 0), wander * dt * 0.9)
+      this.heading.y *= 0.95
+      this.heading.normalize()
+    }
+
+    const moveSpeed = this.seeking ? this.speed * 2.4 : this.speed
+    pos.addScaledVector(this.heading, moveSpeed * dt)
     pos.x = clamp(pos.x, -TANK.w / 2 + 0.8, TANK.w / 2 - 0.8)
     pos.y = clamp(pos.y, 1.0, TANK.h - 0.8)
     pos.z = clamp(pos.z, -TANK.d / 2 + 0.8, TANK.d / 2 - 0.8)
@@ -409,8 +440,34 @@ export class Fish {
     }
 
     this.stats.age += dt
-    this.stats.happiness = clamp(this.stats.happiness + (Math.random() - 0.5) * dt * 3, 0, 100)
     this.stats.hunger = clamp(this.stats.hunger + dt * 0.6, 0, 100)
-    this.stats.health = clamp(this.stats.health + (Math.random() - 0.5) * dt * 1.5, 0, 100)
+
+    let hap = 0
+    let hp = 0
+    if (this.stats.hunger > 80) hap -= dt * 4
+    else if (this.stats.hunger < 30) hap += dt * 1.5
+    if (this.stats.happiness < 25) hp -= dt * 3
+    if (this.stats.happiness > 70) hp += dt * 1.5
+    hap += (Math.random() - 0.5) * dt * 2
+    this.stats.happiness = clamp(this.stats.happiness + hap, 0, 100)
+    this.stats.health = clamp(this.stats.health + hp, 0, 100)
+
+    if (this.breedCooldown > 0) this.breedCooldown -= dt
+
+    if (this.stats.health <= 0) {
+      this.deadTimer += dt
+      if (this.deadTimer > 3 && !this.dead) this.die()
+    } else {
+      this.deadTimer = 0
+    }
+  }
+
+  die() {
+    this.dead = true
+    if (window.__store) {
+      window.__store.markDeath()
+      window.__store.removeFish(this.id)
+    }
+    if (this.mesh.parent) this.mesh.parent.remove(this.mesh)
   }
 }
